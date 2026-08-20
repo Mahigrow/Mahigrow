@@ -1,0 +1,135 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_DATABASE_URL")
+}
+
+model Retailer {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  phone        String   @unique
+  passwordHash String
+  shopName     String
+  ownerName    String
+  gstNumber    String   @unique
+  gstVerified  Boolean  @default(false)
+  district     String
+  state        String   @default("Andhra Pradesh")
+  pincode      String
+  isActive     Boolean  @default(false) // activated by admin after manual verification
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  sessions  RetailerSession[]
+  orders    Order[]
+  otps      OTP[]
+}
+
+model RetailerSession {
+  id         String   @id @default(cuid())
+  token      String   @unique @default(cuid())
+  retailer   Retailer @relation(fields: [retailerId], references: [id], onDelete: Cascade)
+  retailerId String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+
+  @@index([token])
+}
+
+model OTP {
+  id         String   @id @default(cuid())
+  retailer   Retailer @relation(fields: [retailerId], references: [id], onDelete: Cascade)
+  retailerId String
+  code       String
+  purpose    OTPPurpose
+  expiresAt  DateTime
+  used       Boolean  @default(false)
+  attempts   Int      @default(0)
+  createdAt  DateTime @default(now())
+
+  @@index([retailerId, purpose])
+}
+
+enum OTPPurpose {
+  RESET_PASSWORD
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  name        String
+  brand       String
+  category    Category
+  description String?
+  size        String
+  mrp         Int      // paise
+  cert        String
+  unit        String
+  moq         Int
+  step        Int
+  inStock     Boolean  @default(true)
+  stockQty    Int      @default(0)
+  imageUrl    String?
+  isActive    Boolean  @default(true)
+  tiers       Json     // [[minQty,maxQty,priceInPaise],...]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  orderItems  OrderItem[]
+
+  @@index([category, isActive])
+}
+
+enum Category {
+  seeds
+  pesticides
+  insecticides
+  fertilisers
+  fungicides
+  herbicides
+}
+
+model Order {
+  id                  String      @id @default(cuid())
+  retailer            Retailer    @relation(fields: [retailerId], references: [id])
+  retailerId          String
+  subtotal            Int         // paise ex-GST
+  gstAmount           Int
+  grandTotal          Int
+  status              OrderStatus @default(PENDING)
+  razorpayOrderId     String?     @unique
+  razorpayPaymentId   String?     @unique
+  razorpaySignature   String?
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
+
+  items OrderItem[]
+
+  @@index([retailerId, status])
+}
+
+model OrderItem {
+  id          String  @id @default(cuid())
+  order       Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId     String
+  product     Product @relation(fields: [productId], references: [id])
+  productId   String
+  productName String
+  qty         Int
+  ratePerUnit Int     // paise at time of order
+  totalAmount Int
+
+  @@index([orderId])
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PROCESSING
+  DISPATCHED
+  DELIVERED
+  CANCELLED
+}
