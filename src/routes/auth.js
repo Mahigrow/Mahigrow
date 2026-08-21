@@ -4,19 +4,26 @@ const jwt      = require('jsonwebtoken');
 const prisma   = require('../utils/prisma');
 const { isValidEmail, isValidPhone, isValidGSTIN } = require('../utils/validators');
 const { createAndSendOTP, verifyOTP } = require('../services/otp');
+const { requireAuth } = require('../middleware/auth');
 
-// ── Helper: sign JWT ──────────────────────────────────
+// ── sign JWT ──────────────────────────────────────────────────
 function signToken(retailerId) {
-  return jwt.sign({ retailerId }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN || '30d',
-  });
+  return jwt.sign(
+    { retailerId },
+    process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_EXPIRES_IN || '30d' }
+  );
 }
 
-// ─────────────────────────────────────────────────────
+// ── sanitize string input ─────────────────────────────────────
+function clean(str, max = 200) {
+  if (typeof str !== 'string') return '';
+  return str.replace(/[<>"'`]/g, '').trim().slice(0, max);
+}
+
+// ─────────────────────────────────────────────────────────────
 //  POST /api/auth/register
-//  Body: { email, phone, password, shopName, ownerName,
-//          gstNumber, district, pincode, state }
-// ─────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 router.post('/register', async (req, res) => {
   try {
     const {
@@ -24,114 +31,119 @@ router.post('/register', async (req, res) => {
       shopName, ownerName,
       gstNumber, district, pincode,
       state = 'Andhra Pradesh',
+      gstVerified = false,
     } = req.body;
 
-    // ── Validate required fields ──
+    // ── Validate all required fields ──
     const errors = {};
-    if (!isValidEmail(email))        errors.email     = 'Valid email is required';
-    if (!isValidPhone(phone))        errors.phone     = 'Valid 10-digit mobile number required';
+    if (!isValidEmail(email))         errors.email     = 'Valid email required';
+    if (!isValidPhone(phone))         errors.phone     = 'Valid 10-digit mobile required';
     if (!password || password.length < 8) errors.password = 'Password must be at least 8 characters';
-    if (!shopName?.trim())           errors.shopName  = 'Shop name is required';
-    if (!ownerName?.trim())          errors.ownerName = 'Owner name is required';
-    if (!isValidGSTIN(gstNumber))   errors.gstNumber = 'Valid 15-character GSTIN required';
-    if (!district?.trim())           errors.district  = 'District is required';
-    if (!pincode || pincode.length !== 6) errors.pincode = 'Valid 6-digit pincode required';
+    if (password && password.length > 128) errors.password = 'Password too long';
+    if (!clean(shopName))             errors.shopName  = 'Shop name required';
+    if (!clean(ownerName))            errors.ownerName = 'Owner name required';
+    if (!isValidGSTIN(gstNumber))    errors.gstNumber = 'Valid 15-character GSTIN required';
+    if (!clean(district))             errors.district  = 'District required';
+    if (!pincode || !/^\d{6}$/.test(pincode)) errors.pincode = 'Valid 6-digit pincode required';
 
     if (Object.keys(errors).length) {
       return res.status(400).json({ error: 'Validation failed', fields: errors });
     }
 
-    // ── Check duplicates ──
+    // ── Check for duplicates ──
     const existing = await prisma.retailer.findFirst({
       where: {
         OR: [
-          { email:     email.toLowerCase() },
-          { phone:     phone.replace(/\s/g, '') },
-          { gstNumber: gstNumber.toUpperCase() },
+          { email:     email.toLowerCase().trim() },
+          { phone:     phone.trim() },
+          { gstNumber: gstNumber.toUpperCase().trim() },
         ],
       },
       select: { email: true, phone: true, gstNumber: true },
     });
 
     if (existing) {
-      if (existing.email === email.toLowerCase())
+      if (existing.email === email.toLowerCase().trim())
         return res.status(409).json({ error: 'This email is already registered', field: 'email' });
-      if (existing.phone === phone.replace(/\s/g, ''))
+      if (existing.phone === phone.trim())
         return res.status(409).json({ error: 'This phone number is already registered', field: 'phone' });
-      if (existing.gstNumber === gstNumber.toUpperCase())
+      if (existing.gstNumber === gstNumber.toUpperCase().trim())
         return res.status(409).json({ error: 'This GST number is already registered', field: 'gstNumber' });
     }
 
-    // ── Hash password ──
+    // ── Hash password with bcrypt (cost 12) ──
     const passwordHash = await bcrypt.hash(password, 12);
 
     // ── Create retailer ──
     const retailer = await prisma.retailer.create({
       data: {
-        email:        email.toLowerCase(),
-        phone:        phone.replace(/\s/g, ''),
+        email:        email.toLowerCase().trim(),
+        phone:        phone.trim(),
         passwordHash,
-        shopName:     shopName.trim(),
-        ownerName:    ownerName.trim(),
-        gstNumber:    gstNumber.toUpperCase(),
-        gstVerified:  req.body.gstVerified || false,
-        district:     district.trim(),
+        shopName:     clean(shopName, 200),
+        ownerName:    clean(ownerName, 200),
+        gstNumber:    gstNumber.toUpperCase().trim(),
+        gstVerified:  Boolean(gstVerified),
+        district:     clean(district, 100),
         pincode:      pincode.trim(),
-        state:        state.trim(),
-        isActive:     false, // admin activates after verification
+        state:        clean(state, 100),
+        isActive:     false,   // admin activates after verification
       },
-      select: { id: true, email: true, phone: true, shopName: true },
+      select: { id: true, email: true, shopName: true },
     });
 
-    // ── Return success (no token yet — account needs activation) ──
     return res.status(201).json({
-      success:  true,
-      message:  'Account created. Our team will call you within 1 business day to activate it.',
-      retailer: { id: retailer.id, email: retailer.email, shopName: retailer.shopName },
+      success: true,
+      message: 'Account created. Our team will call you within 1 business day to activate it.',
+      retailer,
     });
 
   } catch (err) {
-    console.error('Register error:', err);
+    console.error('Register error:', err.message);
     res.status(500).json({ error: 'Registration failed. Please try again.' });
   }
 });
 
-// ─────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  POST /api/auth/login
-//  Body: { phone, password }
-// ─────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 router.post('/login', async (req, res) => {
   try {
     const { phone, password } = req.body;
 
+    // ── Basic input check ──
     if (!phone || !password) {
       return res.status(400).json({ error: 'Phone number and password are required' });
     }
 
+    if (typeof phone !== 'string' || typeof password !== 'string') {
+      return res.status(400).json({ error: 'Invalid input' });
+    }
+
     // ── Find retailer ──
     const retailer = await prisma.retailer.findUnique({
-      where: { phone: phone.replace(/\s/g, '') },
+      where: { phone: phone.trim() },
     });
 
-    if (!retailer) {
-      return res.status(401).json({ error: 'No account found with this phone number' });
+    // Use constant-time comparison even when retailer not found
+    // to prevent timing attacks that reveal valid phone numbers
+    const dummyHash = '$2a$12$dummy.hash.to.prevent.timing.attacks.xxxxxxxxxxxxxx';
+    const hashToCompare = retailer ? retailer.passwordHash : dummyHash;
+    const passwordMatch = await bcrypt.compare(password, hashToCompare);
+
+    if (!retailer || !passwordMatch) {
+      // Same error for both wrong phone and wrong password
+      // — prevents user enumeration
+      return res.status(401).json({ error: 'Incorrect phone number or password' });
     }
 
-    // ── Check password ──
-    const passwordMatch = await bcrypt.compare(password, retailer.passwordHash);
-    if (!passwordMatch) {
-      return res.status(401).json({ error: 'Incorrect password' });
-    }
-
-    // ── Check if account is activated ──
     if (!retailer.isActive) {
       return res.status(403).json({
         error:  'Account not yet activated',
-        detail: 'Our team will call you within 1 business day to verify and activate your account.',
+        detail: 'Our team will call you within 1 business day.',
       });
     }
 
-    // ── Sign JWT ──
     const token = signToken(retailer.id);
 
     return res.json({
@@ -146,16 +158,14 @@ router.post('/login', async (req, res) => {
     });
 
   } catch (err) {
-    console.error('Login error:', err);
+    console.error('Login error:', err.message);
     res.status(500).json({ error: 'Login failed. Please try again.' });
   }
 });
 
-// ─────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  POST /api/auth/forgot-password
-//  Body: { phone }
-//  Sends OTP to registered phone
-// ─────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 router.post('/forgot-password', async (req, res) => {
   try {
     const { phone } = req.body;
@@ -165,11 +175,11 @@ router.post('/forgot-password', async (req, res) => {
     }
 
     const retailer = await prisma.retailer.findUnique({
-      where:  { phone: phone.replace(/\s/g, '') },
+      where:  { phone: phone.trim() },
       select: { id: true, phone: true },
     });
 
-    // Always return 200 — don't leak whether phone is registered
+    // Always return 200 — don't reveal whether phone is registered
     if (!retailer) {
       return res.json({ success: true, message: 'If this number is registered, an OTP has been sent.' });
     }
@@ -182,15 +192,14 @@ router.post('/forgot-password', async (req, res) => {
     });
 
   } catch (err) {
-    console.error('Forgot password error:', err);
+    console.error('Forgot password error:', err.message);
     res.status(500).json({ error: 'Could not send OTP. Please try again.' });
   }
 });
 
-// ─────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  POST /api/auth/reset-password
-//  Body: { phone, otp, newPassword }
-// ─────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 router.post('/reset-password', async (req, res) => {
   try {
     const { phone, otp, newPassword } = req.body;
@@ -199,12 +208,17 @@ router.post('/reset-password', async (req, res) => {
       return res.status(400).json({ error: 'Phone, OTP and new password are required' });
     }
 
-    if (newPassword.length < 8) {
-      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    if (newPassword.length < 8)  return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    if (newPassword.length > 128) return res.status(400).json({ error: 'Password too long' });
+
+    // Sanitize OTP — only digits allowed
+    const cleanOTP = String(otp).replace(/\D/g, '').slice(0, 6);
+    if (cleanOTP.length !== 6) {
+      return res.status(400).json({ error: 'OTP must be 6 digits' });
     }
 
     const retailer = await prisma.retailer.findUnique({
-      where:  { phone: phone.replace(/\s/g, '') },
+      where:  { phone: phone.trim() },
       select: { id: true },
     });
 
@@ -212,45 +226,44 @@ router.post('/reset-password', async (req, res) => {
       return res.status(404).json({ error: 'No account found with this phone number' });
     }
 
-    // ── Verify OTP ──
-    const result = await verifyOTP(retailer.id, otp, 'RESET_PASSWORD');
+    const result = await verifyOTP(retailer.id, cleanOTP, 'RESET_PASSWORD');
     if (!result.valid) {
       return res.status(400).json({ error: result.reason });
     }
 
-    // ── Update password ──
     const passwordHash = await bcrypt.hash(newPassword, 12);
     await prisma.retailer.update({
       where: { id: retailer.id },
       data:  { passwordHash },
     });
 
-    return res.json({ success: true, message: 'Password updated successfully. Please sign in.' });
+    return res.json({ success: true, message: 'Password updated. Please sign in.' });
 
   } catch (err) {
-    console.error('Reset password error:', err);
+    console.error('Reset password error:', err.message);
     res.status(500).json({ error: 'Could not reset password. Please try again.' });
   }
 });
 
-// ─────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  GET /api/auth/me
-//  Returns current retailer profile (requires token)
-// ─────────────────────────────────────────────────────
-const { requireAuth } = require('../middleware/auth');
-
+// ─────────────────────────────────────────────────────────────
 router.get('/me', requireAuth, async (req, res) => {
-  const retailer = await prisma.retailer.findUnique({
-    where:  { id: req.retailer.id },
-    select: {
-      id: true, email: true, phone: true,
-      shopName: true, ownerName: true,
-      gstNumber: true, district: true,
-      state: true, pincode: true,
-      isActive: true, createdAt: true,
-    },
-  });
-  res.json({ retailer });
+  try {
+    const retailer = await prisma.retailer.findUnique({
+      where:  { id: req.retailer.id },
+      select: {
+        id: true, email: true, phone: true,
+        shopName: true, ownerName: true,
+        gstNumber: true, district: true,
+        state: true, pincode: true,
+        isActive: true, createdAt: true,
+      },
+    });
+    res.json({ retailer });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not fetch profile' });
+  }
 });
 
 module.exports = router;
