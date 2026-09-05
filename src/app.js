@@ -10,6 +10,7 @@ const gstRouter      = require('./routes/gst');
 const productsRouter = require('./routes/products');
 const ordersRouter   = require('./routes/orders');
 const uploadRouter   = require('./routes/upload');
+const adminRouter    = require('./routes/admin');
 
 const app = express();
 
