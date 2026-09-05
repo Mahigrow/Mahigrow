@@ -56,7 +56,7 @@ app.use(rateLimit({
   max:             200,
   standardHeaders: true,
   legacyHeaders:   false,
-  validate:        { xForwardedForHeader: false },   // fix Railway proxy error
+  validate:        { xForwardedForHeader: false, trustProxy: false },
   message:         { error: 'Too many requests. Please try again later.' },
   skip: (req) => req.path === '/health',
 }));
@@ -67,7 +67,7 @@ const authLimiter = rateLimit({
   max:             10,
   standardHeaders: true,
   legacyHeaders:   false,
-  validate:        { xForwardedForHeader: false },
+  validate:        { xForwardedForHeader: false, trustProxy: false },
   message:         { error: 'Too many login attempts. Please wait 15 minutes.' },
 });
 
@@ -77,7 +77,7 @@ const otpLimiter = rateLimit({
   max:             5,
   standardHeaders: true,
   legacyHeaders:   false,
-  validate:        { xForwardedForHeader: false },
+  validate:        { xForwardedForHeader: false, trustProxy: false },
   message:         { error: 'Too many OTP requests. Please wait 1 hour.' },
 });
 
@@ -87,7 +87,7 @@ const uploadLimiter = rateLimit({
   max:             20,
   standardHeaders: true,
   legacyHeaders:   false,
-  validate:        { xForwardedForHeader: false },
+  validate:        { xForwardedForHeader: false, trustProxy: false },
   message:         { error: 'Too many upload requests.' },
 });
 
