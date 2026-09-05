@@ -267,3 +267,64 @@ router.get('/me', requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/auth/admin/login
+//  Only works for phones listed in ADMIN_PHONES env var
+// ─────────────────────────────────────────────────────────────
+router.post('/admin/login', async (req, res) => {
+  try {
+    const { phone, password } = req.body;
+
+    if (!phone || !password) {
+      return res.status(400).json({ error: 'Phone and password are required' });
+    }
+
+    // Check if phone is in admin list
+    const adminPhones = (process.env.ADMIN_PHONES || '')
+      .split(',').map(p => p.trim()).filter(Boolean);
+
+    if (!adminPhones.includes(phone.trim())) {
+      // Log unauthorized attempt
+      console.warn('[ADMIN] Unauthorized login attempt from phone:', phone.trim());
+      // Return same error as wrong password — don't reveal admin phone list
+      return res.status(403).json({ error: 'Incorrect phone or password, or you do not have admin access.' });
+    }
+
+    // Find retailer account
+    const retailer = await prisma.retailer.findUnique({
+      where: { phone: phone.trim() },
+    });
+
+    const dummyHash = '$2a$12$dummy.hash.to.prevent.timing.attacks.xxxxxxxxxxxxxx';
+    const hashToCompare = retailer ? retailer.passwordHash : dummyHash;
+    const passwordMatch = await bcrypt.compare(password, hashToCompare);
+
+    if (!retailer || !passwordMatch) {
+      return res.status(401).json({ error: 'Incorrect phone or password, or you do not have admin access.' });
+    }
+
+    // Sign admin token with extra claim
+    const token = jwt.sign(
+      { retailerId: retailer.id, isAdmin: true },
+      process.env.JWT_SECRET,
+      { expiresIn: '8h' }  // shorter session for admin
+    );
+
+    console.log('[ADMIN] Login:', phone.trim(), new Date().toISOString());
+
+    return res.json({
+      success: true,
+      token,
+      admin: {
+        id:       retailer.id,
+        phone:    retailer.phone,
+        shopName: retailer.shopName,
+      },
+    });
+
+  } catch (err) {
+    console.error('Admin login error:', err.message);
+    res.status(500).json({ error: 'Login failed. Please try again.' });
+  }
+});
