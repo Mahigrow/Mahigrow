@@ -328,4 +328,67 @@ router.post('/admin/login', async (req, res) => {
   }
 });
 
+// ── GET /api/auth/admin/retailers (temporary mount) ──────────
+router.get('/admin/retailers', async (req, res) => {
+  try {
+    const header = req.headers.authorization;
+    if (!header || !header.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Admin authentication required' });
+    }
+    const token   = header.split(' ')[1];
+    const jwt     = require('jsonwebtoken');
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    if (!payload.isAdmin) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    const adminPhones = (process.env.ADMIN_PHONES || '').split(',').map(p => p.trim());
+    const me = await prisma.retailer.findUnique({ where: { id: payload.retailerId }, select: { phone: true } });
+    if (!me || !adminPhones.includes(me.phone)) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    const retailers = await prisma.retailer.findMany({
+      select: {
+        id: true, email: true, phone: true,
+        shopName: true, ownerName: true,
+        gstNumber: true, gstVerified: true,
+        district: true, state: true, pincode: true,
+        isActive: true, createdAt: true,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json({ retailers });
+  } catch (err) {
+    console.error('Admin retailers error:', err.message);
+    res.status(500).json({ error: 'Could not fetch retailers' });
+  }
+});
+
+// ── PATCH /api/auth/admin/retailers/:id ───────────────────────
+router.patch('/admin/retailers/:id', async (req, res) => {
+  try {
+    const header = req.headers.authorization;
+    if (!header || !header.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Admin authentication required' });
+    }
+    const jwt     = require('jsonwebtoken');
+    const payload = jwt.verify(header.split(' ')[1], process.env.JWT_SECRET);
+    if (!payload.isAdmin) return res.status(403).json({ error: 'Admin access required' });
+
+    const { isActive } = req.body;
+    if (typeof isActive !== 'boolean') {
+      return res.status(400).json({ error: 'isActive must be true or false' });
+    }
+    const retailer = await prisma.retailer.update({
+      where: { id: req.params.id },
+      data:  { isActive },
+      select: { id: true, phone: true, shopName: true, isActive: true },
+    });
+    res.json({ success: true, retailer });
+  } catch (err) {
+    if (err.code === 'P2025') return res.status(404).json({ error: 'Retailer not found' });
+    res.status(500).json({ error: 'Could not update retailer' });
+  }
+});
+
+
 module.exports = router;
