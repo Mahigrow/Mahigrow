@@ -266,7 +266,6 @@ router.get('/me', requireAuth, async (req, res) => {
   }
 });
 
-module.exports = router;
 
 // ─────────────────────────────────────────────────────────────
 //  POST /api/auth/admin/login
@@ -328,3 +327,5 @@ router.post('/admin/login', async (req, res) => {
     res.status(500).json({ error: 'Login failed. Please try again.' });
   }
 });
+
+module.exports = router;
