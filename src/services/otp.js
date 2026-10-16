@@ -146,7 +146,7 @@ async function createAndSendOTP(retailerId, phone, purpose = 'VERIFY_PHONE') {
 
   // Save new OTP
   await prisma.oTP.create({
-    data: { retailerId, otp, purpose, expiresAt, attempts: 0, used: false },
+    data: { retailerId, code: otp, purpose, expiresAt, attempts: 0, used: false },
   });
 
   // Get retailer email
@@ -214,7 +214,7 @@ async function verifyOTP(retailerId, inputOtp, purpose = 'VERIFY_PHONE') {
     data:  { attempts: { increment: 1 } },
   });
 
-  if (record.otp !== inputOtp.trim()) {
+  if (record.code !== inputOtp.trim()) {
     const left = OTP_MAX_ATTEMPTS - (record.attempts + 1);
     return {
       valid:  false,
