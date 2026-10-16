@@ -184,11 +184,23 @@ router.post('/forgot-password', async (req, res) => {
       return res.json({ success: true, message: 'If this number is registered, an OTP has been sent.' });
     }
 
-    await createAndSendOTP(retailer.id, retailer.phone, 'RESET_PASSWORD');
+    const result = await createAndSendOTP(retailer.id, retailer.phone, 'RESET_PASSWORD');
+
+    // Tell user where OTP was sent (email or SMS)
+    const sentVia = result.channel === 'email'
+      ? 'OTP sent to your registered email address.'
+      : result.channel === 'sms'
+      ? 'OTP sent to your registered mobile number via SMS.'
+      : 'OTP generated. Check Railway logs (dev mode).';
 
     return res.json({
       success: true,
-      message: 'OTP sent to your registered mobile number.',
+      message: sentVia,
+      channel: result.channel,
+      // Mask the destination for security
+      sentTo:  result.channel === 'email'
+        ? result.sentTo.replace(/(.{2}).+(@.+)/, '$1***$2')
+        : result.sentTo.replace(/(\d{2})\d+(\d{2})/, '$1******$2'),
     });
 
   } catch (err) {
