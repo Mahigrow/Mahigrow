@@ -1,5 +1,6 @@
 const router = require('express').Router();
 const prisma = require('../utils/prisma');
+const { requireAdmin } = require('../middleware/auth');
 
 // GET /api/products
 // Query: ?category=seeds&inStock=true
@@ -30,7 +31,22 @@ router.get('/', async (req, res) => {
       imageUrl: p.imageUrl || null,
     }));
 
-    res.json({ products: formatted });
+    // Compute category counts and unique brands for frontend
+    const categoryCounts = {};
+    const brandSet = new Set();
+    formatted.forEach(p => {
+      categoryCounts[p.category] = (categoryCounts[p.category] || 0) + 1;
+      if (p.brand) brandSet.add(p.brand);
+    });
+
+    res.json({
+      products: formatted,
+      meta: {
+        total:          formatted.length,
+        categoryCounts,
+        brands:         [...brandSet].sort(),
+      },
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Could not fetch products' });
@@ -65,7 +81,7 @@ router.get('/:id', async (req, res) => {
 //          unit, moq, step, stockQty, inStock, tiers }
 //  Prices sent in rupees, stored in paise
 // ─────────────────────────────────────────────────────
-router.post('/', async (req, res) => {
+router.post('/', requireAdmin, async (req, res) => {
   try {
     const {
       name, brand, category, size, cert,
@@ -122,7 +138,7 @@ router.post('/', async (req, res) => {
 //  PUT /api/products/:id
 //  Admin: update an existing product
 // ─────────────────────────────────────────────────────
-router.put('/:id', async (req, res) => {
+router.put('/:id', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const {
@@ -181,7 +197,7 @@ router.put('/:id', async (req, res) => {
 //  Admin: delete a product (soft delete — sets isActive false)
 //  Use ?hard=true to permanently delete
 // ─────────────────────────────────────────────────────
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requireAdmin, async (req, res) => {
   try {
     const { id }   = req.params;
     const hardDelete = req.query.hard === 'true';
