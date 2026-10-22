@@ -1,89 +1,67 @@
+'use strict';
 const router = require('express').Router();
 const axios  = require('axios');
-const { isValidGSTIN } = require('../utils/validators');
 
-const STATE_CODES = {
+const GST_STATES = {
   '01':'Jammu & Kashmir','02':'Himachal Pradesh','03':'Punjab','04':'Chandigarh',
   '05':'Uttarakhand','06':'Haryana','07':'Delhi','08':'Rajasthan','09':'Uttar Pradesh',
   '10':'Bihar','11':'Sikkim','12':'Arunachal Pradesh','13':'Nagaland','14':'Manipur',
   '15':'Mizoram','16':'Tripura','17':'Meghalaya','18':'Assam','19':'West Bengal',
   '20':'Jharkhand','21':'Odisha','22':'Chhattisgarh','23':'Madhya Pradesh',
-  '24':'Gujarat','26':'Dadra & Nagar Haveli','27':'Maharashtra',
-  '28':'Andhra Pradesh (old)','29':'Karnataka','30':'Goa',
-  '32':'Kerala','33':'Tamil Nadu','34':'Puducherry',
-  '36':'Telangana','37':'Andhra Pradesh','38':'Ladakh',
+  '24':'Gujarat','25':'Daman & Diu','26':'Dadra & Nagar Haveli','27':'Maharashtra',
+  '28':'Andhra Pradesh','29':'Karnataka','30':'Goa','31':'Lakshadweep',
+  '32':'Kerala','33':'Tamil Nadu','34':'Puducherry','35':'Andaman & Nicobar',
+  '36':'Telangana','37':'Andhra Pradesh (new)','38':'Ladakh',
 };
 
-// GET /api/gst/validate-format?gstin=37AABCU9603R1ZX
-// Instant format check — no API call
-router.get('/validate-format', (req, res) => {
-  const gstin = (req.query.gstin || '').toUpperCase().trim();
-
-  if (!isValidGSTIN(gstin)) {
-    return res.status(400).json({ valid: false, error: 'Invalid GSTIN format' });
-  }
-
-  const stateCode = gstin.substring(0, 2);
-  return res.json({
-    valid:     true,
-    gstin,
-    stateName: STATE_CODES[stateCode] || 'Unknown',
-  });
-});
-
 // POST /api/gst/verify
-// Body: { gstin }
-// Full live verification via GSTINcheck API
 router.post('/verify', async (req, res) => {
-  const gstin = (req.body.gstin || '').toUpperCase().trim();
-
-  if (!isValidGSTIN(gstin)) {
-    return res.status(400).json({ verified: false, error: 'Invalid GSTIN format' });
-  }
-
   try {
-    const apiKey   = process.env.GSTINCHECK_API_KEY;
-    const response = await axios.get(
-      `https://api.gstincheck.co.in/check/${apiKey}/${gstin}`,
-      { timeout: 8000 }
-    );
+    const { gstin } = req.body;
+    if (!gstin) return res.status(400).json({ error: 'GSTIN required' });
 
-    const data = response.data;
+    // Basic format validation
+    const gstRegex = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/;
+    if (!gstRegex.test(gstin.toUpperCase()))
+      return res.status(400).json({ error: 'Invalid GSTIN format' });
 
-    if (!data.flag) {
-      return res.status(404).json({
-        verified: false,
-        error:    'GSTIN not found in government database. Please check the number.',
-      });
+    const stateCode = gstin.slice(0, 2);
+    const state     = GST_STATES[stateCode] || '';
+
+    // Try GST API
+    if (process.env.GSTINCHECK_API_KEY) {
+      try {
+        const resp = await axios.get(`https://sheet.gstincheck.co.in/check/${process.env.GSTINCHECK_API_KEY}/${gstin}`, {
+          timeout: 5000,
+        });
+        const d = resp.data;
+        if (d && d.flag) {
+          return res.json({
+            valid: true,
+            gstin: gstin.toUpperCase(),
+            legalName: d.data?.lgnm || '',
+            tradeName: d.data?.tradeNam || '',
+            state,
+            verified: true,
+          });
+        }
+      } catch (apiErr) {
+        console.warn('GST API failed, soft-verify:', apiErr.message);
+      }
     }
 
-    if (data.sts && data.sts.toLowerCase() !== 'active') {
-      return res.status(400).json({
-        verified: false,
-        error:    `GST registration is ${data.sts}. Only active GSTINs are accepted.`,
-      });
-    }
-
-    return res.json({
-      verified:         true,
-      gstin,
-      tradeName:        data.tradeNam || '',
-      legalName:        data.lgnm     || '',
-      status:           data.sts      || 'Active',
-      registrationDate: data.rgdt     || '',
-      stateName:        STATE_CODES[gstin.substring(0, 2)] || '',
+    // Soft-verify fallback — format valid, state auto-filled
+    res.json({
+      valid: true,
+      gstin: gstin.toUpperCase(),
+      legalName: '',
+      tradeName: '',
+      state,
+      verified: false, // soft-verified (format only)
     });
-
   } catch (err) {
-    console.error('GST API error:', err.message);
-
-    // Soft fail — let the user register, team verifies manually
-    return res.status(503).json({
-      verified:  false,
-      softFail:  true,
-      error:     'Verification service unavailable. Your format is valid — our team will verify manually.',
-      stateName: STATE_CODES[gstin.substring(0, 2)] || '',
-    });
+    console.error('GST verify error:', err);
+    res.status(500).json({ error: 'GST verification failed' });
   }
 });
 
