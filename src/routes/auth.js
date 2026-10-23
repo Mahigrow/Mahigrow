@@ -253,9 +253,26 @@ router.post('/reset-password', async (req, res) => {
       return res.status(404).json({ error: 'No account found with this phone number' });
     }
 
-    const result = await verifyOTP(retailer.id, cleanOTP, 'RESET_PASSWORD');
-    if (!result.valid) {
-      return res.status(400).json({ error: result.reason });
+    // OTP was already verified (marked used) in the verify-otp step.
+    // Look for a recently-used valid OTP (within last 15 min) to confirm legitimacy.
+    const fifteenMinAgo = new Date(Date.now() - 15 * 60 * 1000);
+    const usedOtp = await prisma.oTP.findFirst({
+      where: {
+        retailerId: retailer.id,
+        purpose: 'RESET_PASSWORD',
+        used: true,
+        code: cleanOTP,
+        createdAt: { gte: fifteenMinAgo },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!usedOtp) {
+      // Fallback: also check if there's a still-unused OTP (in case verify was skipped)
+      const unusedResult = await verifyOTP(retailer.id, cleanOTP, 'RESET_PASSWORD');
+      if (!unusedResult.valid) {
+        return res.status(400).json({ error: 'OTP session expired. Please start over.' });
+      }
     }
 
     const passwordHash = await bcrypt.hash(newPassword, 12);
