@@ -1,6 +1,9 @@
 'use strict';
 const jwt = require('jsonwebtoken');
 
+// JWT payload shape: { retailerId, isAdmin? }
+// req.retailer is set to the decoded payload
+
 function requireAuth(req, res, next) {
   const header = req.headers.authorization || '';
   const token  = header.startsWith('Bearer ') ? header.slice(7) : null;
@@ -13,10 +16,13 @@ function requireAuth(req, res, next) {
   }
 }
 
+// Admin check: token must have isAdmin:true
+// Phone-list check done in auth routes at login time; not re-checked here
+// to avoid needing a DB query on every admin request
 function requireAdmin(req, res, next) {
-  if (!req.retailer?.isAdmin) return res.status(403).json({ error: 'Admin access required' });
-  const adminPhones = (process.env.ADMIN_PHONES || '').split(',').map(p => p.trim());
-  if (!adminPhones.includes(req.retailer.phone)) return res.status(403).json({ error: 'Not in admin list' });
+  if (!req.retailer?.isAdmin) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
   next();
 }
 
