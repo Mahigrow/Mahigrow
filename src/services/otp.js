@@ -80,24 +80,35 @@ async function sendOTP(retailerId, destination, purpose) {
 
 // ── Verify OTP ────────────────────────────────
 async function verifyOTP(retailerId, code, purpose) {
-  const record = await prisma.oTP.findFirst({
-    where: {
-      retailerId,
-      code,           // field name matches schema
-      purpose,
-      used: false,
-      expiresAt: { gt: new Date() },
-    },
+  // Check for any non-expired record first (to give right error message)
+  const anyRecord = await prisma.oTP.findFirst({
+    where: { retailerId, purpose, used: false },
     orderBy: { createdAt: 'desc' },
   });
 
-  if (!record) return false;
+  if (!anyRecord) {
+    return { valid: false, reason: 'No OTP found. Please request a new one.' };
+  }
 
+  if (anyRecord.expiresAt < new Date()) {
+    return { valid: false, reason: 'OTP has expired. Please request a new one.' };
+  }
+
+  if (anyRecord.code !== code) {
+    // Increment attempts
+    await prisma.oTP.update({
+      where: { id: anyRecord.id },
+      data:  { attempts: { increment: 1 } },
+    });
+    return { valid: false, reason: 'Incorrect OTP. Please try again.' };
+  }
+
+  // Valid — mark as used
   await prisma.oTP.update({
-    where: { id: record.id },
-    data: { used: true },
+    where: { id: anyRecord.id },
+    data:  { used: true },
   });
-  return true;
+  return { valid: true };
 }
 
-module.exports = { sendOTP, verifyOTP };
+module.exports = { createAndSendOTP: sendOTP, verifyOTP };
