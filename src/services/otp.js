@@ -53,7 +53,7 @@ async function sendOTP(retailerId, destination, purpose) {
     },
   });
 
-  // Determine if destination is email or phone
+  // Always send via email
   const isEmail = destination.includes('@');
 
   if (isEmail) {
@@ -62,20 +62,15 @@ async function sendOTP(retailerId, destination, purpose) {
       return { sent: true, via: 'email', destination };
     } catch (e) {
       console.error('Resend email failed:', e.message);
+      // Dev fallback — log OTP so it's not lost
+      console.log(`[DEV OTP] ${destination} → ${otp} (${purpose})`);
+      return { sent: true, via: 'console', destination };
     }
   }
 
-  // Try SMS fallback
-  try {
-    await sendSMS(isEmail ? null : destination, otp);
-    return { sent: true, via: 'sms', destination };
-  } catch (e) {
-    console.error('Fast2SMS failed:', e.message);
-  }
-
-  // Dev fallback
-  console.log(`[DEV OTP] ${destination} → ${otp} (${purpose})`);
-  return { sent: true, via: 'console', destination };
+  // No email available — log OTP for dev/support use
+  console.log(`[NO EMAIL] ${destination} → ${otp} (${purpose})`);
+  return { sent: false, via: 'none', destination };
 }
 
 // ── Verify OTP ────────────────────────────────

@@ -170,15 +170,19 @@ router.post('/forgot-password', async (req, res) => {
 
     // Always return 200 — don't reveal whether phone is registered
     if (!retailer) {
-      return res.json({ success: true, via: 'sms', destination: phone.trim() });
+      return res.json({ success: true, via: 'email', destination: 'your registered email' });
     }
 
-    const result = await createAndSendOTP(retailer.id, retailer.phone, 'RESET_PASSWORD');
+    if (!retailer.email) {
+      return res.status(400).json({ error: 'No email address on file. Please contact support.' });
+    }
+
+    const result = await createAndSendOTP(retailer.id, retailer.email, 'RESET_PASSWORD');
 
     return res.json({
       success:     true,
-      via:         result.channel || 'sms',
-      destination: result.sentTo  || phone.trim(),
+      via:         result.via || 'email',
+      destination: result.destination || retailer.email,
     });
 
   } catch (err) {
