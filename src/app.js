@@ -30,7 +30,14 @@ const allowedOrigins = [
 ];
 app.use(cors({
   origin: (origin, cb) => {
-    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+    // Allow requests with no origin (mobile apps, curl, server-to-server)
+    if (!origin) return cb(null, true);
+    // Allow exact matches
+    if (allowedOrigins.includes(origin)) return cb(null, true);
+    // Allow any Cloudflare Pages preview URLs (*.pages.dev)
+    if (origin.endsWith('.pages.dev')) return cb(null, true);
+    // Allow localhost on any port for development
+    if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return cb(null, true);
     cb(new Error('Not allowed by CORS'));
   },
   credentials: true,
