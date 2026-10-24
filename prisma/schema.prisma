@@ -16,7 +16,7 @@ model Retailer {
   passwordHash String
   shopName     String
   ownerName    String
-  gstNumber    String   @unique
+  gstin        String?  @unique
   gstVerified  Boolean  @default(false)
   district     String
   state        String   @default("Andhra Pradesh")
