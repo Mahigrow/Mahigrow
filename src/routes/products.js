@@ -1,127 +1,258 @@
-'use strict';
 const router = require('express').Router();
 const prisma = require('../utils/prisma');
-const { requireAuth, requireAdmin } = require('../middleware/auth');
+const { requireAdmin } = require('../middleware/auth');
 
-// ── GET /api/products ─────────────────────────
+// ── HELPERS ──────────────────────────────────────────────────────
+// Variants stored in paise, returned in rupees
+function formatVariants(variants) {
+  if (!variants || !Array.isArray(variants)) return null;
+  return variants.map(v => ({
+    size: v.size,
+    mrp:  v.mrp / 100,
+    tiers: (v.tiers || []).map(([min, max, price]) => [min, max, price / 100]),
+  }));
+}
+
+function storeVariants(variants) {
+  if (!variants || !Array.isArray(variants)) return undefined;
+  return variants.map(v => ({
+    size: v.size,
+    mrp:  Math.round(v.mrp * 100),
+    tiers: (v.tiers || []).map(([min, max, price]) => [
+      parseInt(min),
+      max === null || max === '' ? null : parseInt(max),
+      Math.round(price * 100),
+    ]),
+  }));
+}
+
+// GET /api/products
+// Query: ?category=seeds&inStock=true
 router.get('/', async (req, res) => {
   try {
-    const { category, brand, search, page = 1, limit = 100 } = req.query;
-    const where = {};
+    const { category, inStock } = req.query;
+
+    const where = { isActive: true };
     if (category) where.category = category;
-    if (brand)    where.brand    = brand;
-    if (search)   where.name     = { contains: search, mode: 'insensitive' };
+    if (inStock === 'true') where.inStock = true;
 
-    const [products, total] = await Promise.all([
-      prisma.product.findMany({
-        where,
-        orderBy: [{ category: 'asc' }, { name: 'asc' }],
-        skip: (Number(page) - 1) * Number(limit),
-        take: Number(limit),
-      }),
-      prisma.product.count({ where }),
-    ]);
-
-    // Build category counts and brand list for frontend dynamic nav
-    const allProducts = await prisma.product.findMany({
-      select: { category: true, brand: true },
+    const products = await prisma.product.findMany({
+      where,
+      orderBy: [{ category: 'asc' }, { name: 'asc' }],
+      select: {
+        id: true, name: true, brand: true, category: true,
+        size: true, mrp: true, cert: true, unit: true,
+        moq: true, step: true, inStock: true, stockQty: true,
+        tiers: true, variants: true, imageUrl: true,
+      },
     });
 
+    // Convert paise → rupees for the frontend
+    const formatted = products.map(p => ({
+      ...p,
+      mrp:      p.mrp / 100,
+      tiers:    p.tiers.map(([min, max, price]) => [min, max, price / 100]),
+      variants: formatVariants(p.variants),
+      imageUrl: p.imageUrl || null,
+    }));
+
+    // Compute category counts and unique brands for frontend
     const categoryCounts = {};
-    const brandsSet = new Set();
-    allProducts.forEach(p => {
+    const brandSet = new Set();
+    formatted.forEach(p => {
       categoryCounts[p.category] = (categoryCounts[p.category] || 0) + 1;
-      if (p.brand) brandsSet.add(p.brand);
+      if (p.brand) brandSet.add(p.brand);
     });
 
     res.json({
-      products,
+      products: formatted,
       meta: {
-        total,
-        page: Number(page),
-        limit: Number(limit),
+        total:          formatted.length,
         categoryCounts,
-        brands: [...brandsSet].sort(),
+        brands:         [...brandSet].sort(),
       },
     });
   } catch (err) {
-    console.error('Get products error:', err);
-    res.status(500).json({ error: 'Server error' });
+    console.error(err);
+    res.status(500).json({ error: 'Could not fetch products' });
   }
 });
 
-// ── GET /api/products/:id ─────────────────────
+// GET /api/products/:id
 router.get('/:id', async (req, res) => {
   try {
-    const product = await prisma.product.findUnique({ where: { id: req.params.id } });
+    const product = await prisma.product.findUnique({
+      where: { id: req.params.id },
+    });
+
     if (!product) return res.status(404).json({ error: 'Product not found' });
-    res.json({ product });
+
+    res.json({
+      product: {
+        ...product,
+        mrp:      product.mrp / 100,
+        tiers:    product.tiers.map(([min, max, price]) => [min, max, price / 100]),
+        variants: formatVariants(product.variants),
+      },
+    });
   } catch (err) {
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: 'Could not fetch product' });
   }
 });
 
-// ── POST /api/products — Create (admin) ───────
-router.post('/', requireAuth, requireAdmin, async (req, res) => {
+// ─────────────────────────────────────────────────────
+//  POST /api/products
+//  Admin: create a new product
+//  Body: { name, brand, category, size, cert, mrp,
+//          unit, moq, step, stockQty, inStock, tiers,
+//          variants: [{size, mrp, tiers}] }
+//  Prices sent in rupees, stored in paise
+// ─────────────────────────────────────────────────────
+router.post('/', requireAdmin, async (req, res) => {
   try {
     const {
-      name, category, brand, size, unit,
-      mrp, tiers, moq, step, cert, inStock, stockQty, imageUrl,
+      name, brand, category, size, cert,
+      description = '',
+      mrp, unit, moq, step,
+      stockQty = 0, inStock = true,
+      tiers, variants, imageUrl = null,
     } = req.body;
 
-    if (!name || !category || !tiers)
-      return res.status(400).json({ error: 'name, category, tiers required' });
+    // Basic validation
+    if (!name || !brand || !category || !mrp || !moq || !tiers?.length) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
 
     const product = await prisma.product.create({
       data: {
-        name, category, brand: brand || '',
-        size: size || '', unit: unit || 'bag',
-        mrp: Number(mrp) || 0,
-        tiers: tiers,           // JSON array [[minQty, maxQty, price], ...]
-        basePrice: tiers[0][2], // first tier price
-        moq: Number(moq) || 1,
-        step: Number(step) || 1,
-        cert: cert || 'ISI',
-        inStock: inStock !== false,
-        stockQty: Number(stockQty) || 0,
-        imageUrl: imageUrl || null,
+        name:        name.trim(),
+        brand:       brand.trim(),
+        category,
+        size:        size?.trim() || '',
+        cert:        cert || 'CIB',
+        description: description.trim(),
+        mrp:         Math.round(mrp * 100),       // rupees → paise
+        unit:        unit || 'unit',
+        moq:         parseInt(moq),
+        step:        parseInt(step) || parseInt(moq),
+        stockQty:    parseInt(stockQty) || 0,
+        inStock:     Boolean(inStock),
+        isActive:    true,
+        imageUrl:    imageUrl || null,
+        tiers:       tiers.map(([min, max, price]) => [
+          parseInt(min),
+          max === null || max === '' ? null : parseInt(max),
+          Math.round(price * 100),               // rupees → paise
+        ]),
+        ...(variants?.length && { variants: storeVariants(variants) }),
       },
     });
 
-    res.status(201).json({ product });
+    res.status(201).json({
+      success: true,
+      product: {
+        ...product,
+        mrp:      product.mrp / 100,
+        tiers:    product.tiers.map(([min, max, price]) => [min, max, price / 100]),
+        variants: formatVariants(product.variants),
+      },
+    });
   } catch (err) {
     console.error('Create product error:', err);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: 'Could not create product' });
   }
 });
 
-// ── PATCH /api/products/:id — Update (admin) ──
-router.patch('/:id', requireAuth, requireAdmin, async (req, res) => {
+// ─────────────────────────────────────────────────────
+//  PUT /api/products/:id
+//  Admin: update an existing product
+// ─────────────────────────────────────────────────────
+router.put('/:id', requireAdmin, async (req, res) => {
   try {
-    const data = { ...req.body };
-    if (data.mrp)  data.mrp = Number(data.mrp);
-    if (data.moq)  data.moq = Number(data.moq);
-    if (data.step) data.step = Number(data.step);
-    if (data.tiers && data.tiers[0]) data.basePrice = data.tiers[0][2];
+    const { id } = req.params;
+    const {
+      name, brand, category, size, cert,
+      description = '',
+      mrp, unit, moq, step,
+      stockQty, inStock, tiers, variants, isActive, imageUrl,
+    } = req.body;
 
-    const product = await prisma.product.update({
-      where: { id: req.params.id },
-      data,
+    const existing = await prisma.product.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: 'Product not found' });
+
+    const updated = await prisma.product.update({
+      where: { id },
+      data: {
+        ...(name        && { name: name.trim() }),
+        ...(brand       && { brand: brand.trim() }),
+        ...(category    && { category }),
+        ...(size        && { size: size.trim() }),
+        ...(cert        && { cert }),
+        ...(description !== undefined && { description: description.trim() }),
+        ...(mrp !== undefined && { mrp: Math.round(mrp * 100) }),
+        ...(unit        && { unit }),
+        ...(moq         && { moq: parseInt(moq) }),
+        ...(step        && { step: parseInt(step) }),
+        ...(stockQty !== undefined && { stockQty: parseInt(stockQty) }),
+        ...(inStock  !== undefined && { inStock: Boolean(inStock) }),
+        ...(isActive !== undefined && { isActive: Boolean(isActive) }),
+        ...(imageUrl !== undefined && { imageUrl: imageUrl || null }),
+        ...(tiers?.length && {
+          tiers: tiers.map(([min, max, price]) => [
+            parseInt(min),
+            max === null || max === '' ? null : parseInt(max),
+            Math.round(price * 100),
+          ]),
+        }),
+        // Allow clearing variants by passing empty array
+        ...(variants !== undefined && {
+          variants: variants?.length ? storeVariants(variants) : null,
+        }),
+      },
     });
-    res.json({ product });
+
+    res.json({
+      success: true,
+      product: {
+        ...updated,
+        mrp:      updated.mrp / 100,
+        tiers:    updated.tiers.map(([min, max, price]) => [min, max, price / 100]),
+        variants: formatVariants(updated.variants),
+      },
+    });
   } catch (err) {
     console.error('Update product error:', err);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: 'Could not update product' });
   }
 });
 
-// ── DELETE /api/products/:id (admin) ─────────
-router.delete('/:id', requireAuth, requireAdmin, async (req, res) => {
+// ─────────────────────────────────────────────────────
+//  DELETE /api/products/:id
+//  Admin: delete a product (soft delete — sets isActive false)
+//  Use ?hard=true to permanently delete
+// ─────────────────────────────────────────────────────
+router.delete('/:id', requireAdmin, async (req, res) => {
   try {
-    await prisma.product.delete({ where: { id: req.params.id } });
-    res.json({ message: 'Product deleted' });
+    const { id }   = req.params;
+    const hardDelete = req.query.hard === 'true';
+
+    const existing = await prisma.product.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: 'Product not found' });
+
+    if (hardDelete) {
+      await prisma.product.delete({ where: { id } });
+    } else {
+      // Soft delete — hide from catalogue but keep order history intact
+      await prisma.product.update({
+        where: { id },
+        data:  { isActive: false },
+      });
+    }
+
+    res.json({ success: true, message: 'Product removed from catalogue' });
   } catch (err) {
-    res.status(500).json({ error: 'Server error' });
+    console.error('Delete product error:', err);
+    res.status(500).json({ error: 'Could not delete product' });
   }
 });
 

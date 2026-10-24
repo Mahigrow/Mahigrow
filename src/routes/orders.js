@@ -1,173 +1,266 @@
-'use strict';
-const router = require('express').Router();
-const prisma = require('../utils/prisma');
+// ─────────────────────────────────────────────────────────────
+//  routes/orders.js  —  COD Orders + Tracking
+// ─────────────────────────────────────────────────────────────
+const router  = require('express').Router();
+const prisma  = require('../utils/prisma');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
 
-// ── Helper: get price for qty from tiers ─────
-function getTierPrice(tiers, qty) {
-  // tiers = [[minQty, maxQty, price], ...]
-  if (!tiers || !tiers.length) return 0;
-  for (let i = tiers.length - 1; i >= 0; i--) {
-    if (qty >= tiers[i][0]) return tiers[i][2];
-  }
-  return tiers[0][2];
-}
-
-// ── POST /api/orders — Place COD order ───────
+// ─────────────────────────────────────────────────────────────
+//  POST /api/orders  —  Place a COD order
+// ─────────────────────────────────────────────────────────────
 router.post('/', requireAuth, async (req, res) => {
   try {
-    const { items } = req.body; // [{ productId, qty }]
-    if (!items || !items.length)
-      return res.status(400).json({ error: 'No items in order' });
+    const { items } = req.body;
 
-    let totalAmount = 0;
+    if (!items?.length) {
+      return res.status(400).json({ error: 'No items in order' });
+    }
+
+    // Fetch product details and calculate totals
+    let subtotal = 0;
     const orderItems = [];
 
     for (const item of items) {
-      if (!item.productId || !item.qty || item.qty < 1)
-        return res.status(400).json({ error: 'Invalid item: productId and qty required' });
+      const product = await prisma.product.findUnique({
+        where:  { id: item.productId, isActive: true },
+        select: { id: true, name: true, tiers: true, variants: true, unit: true, moq: true, inStock: true },
+      });
 
-      const product = await prisma.product.findUnique({ where: { id: item.productId } });
-      if (!product) return res.status(404).json({ error: `Product not found: ${item.productId}` });
+      if (!product) {
+        return res.status(400).json({ error: `Product not found: ${item.productId}` });
+      }
+      if (!product.inStock) {
+        return res.status(400).json({ error: `${product.name} is out of stock` });
+      }
+      if (item.qty < product.moq) {
+        return res.status(400).json({
+          error: `Minimum order for ${product.name} is ${product.moq} ${product.unit}(s)`,
+        });
+      }
 
-      const unitPrice = getTierPrice(product.tiers, item.qty);
-      const lineTotal = unitPrice * item.qty;
-      totalAmount += lineTotal;
+      // Determine tiers to use: variant tiers (if variantSize specified) or product tiers
+      let tiersToUse = product.tiers;
+      let variantSize = item.variantSize || null;
+
+      if (variantSize && Array.isArray(product.variants)) {
+        const variant = product.variants.find(v => v.size === variantSize);
+        if (!variant) {
+          return res.status(400).json({ error: `Variant size "${variantSize}" not found for ${product.name}` });
+        }
+        tiersToUse = variant.tiers || product.tiers;
+      }
+
+      // Calculate price from tiers (stored in paise)
+      let rate = tiersToUse[0][2];
+      for (const [min, max, price] of tiersToUse) {
+        if (item.qty >= min) rate = price;
+        if (item.qty >= min && (max === null || item.qty <= max)) break;
+      }
+
+      const total = rate * item.qty;
+      subtotal   += total;
 
       orderItems.push({
-        productId: item.productId,
-        qty: item.qty,
-        unitPrice,
-        lineTotal,
+        productId:   product.id,
+        qty:         item.qty,
+        variantSize: variantSize,
+        rate,
+        total,
       });
     }
 
+    const gstAmount   = Math.round(subtotal * 0.12);
+    const grandTotal  = subtotal + gstAmount;
+
+    // Create order in DB
     const order = await prisma.order.create({
       data: {
-        retailerId: req.retailer.retailerId,
-        totalAmount,
-        status: 'PLACED',
+        retailerId:    req.retailer.id,
+        status:        'PLACED',
         paymentMethod: 'COD',
-        items: { create: orderItems },
+        subtotal,
+        gstAmount,
+        grandTotal,
+        items: {
+          create: orderItems,
+        },
       },
       include: {
         items: {
-          include: { product: { select: { name: true, unit: true } } },
+          include: { product: { select: { name: true, unit: true, imageUrl: true } } },
         },
       },
     });
 
-    res.status(201).json({ order });
+    // Format response (convert paise to rupees)
+    const formatted = {
+      ...order,
+      subtotal:    order.subtotal   / 100,
+      gstAmount:   order.gstAmount  / 100,
+      grandTotal:  order.grandTotal / 100,
+      totalAmount: order.grandTotal / 100,   // alias for frontend
+      items: order.items.map(i => ({
+        ...i,
+        unitPrice: i.rate  / 100,            // alias for frontend
+        lineTotal: i.total / 100,            // alias for frontend
+        rate:      i.rate  / 100,
+        total:     i.total / 100,
+      })),
+    };
+
+    res.status(201).json({ success: true, order: formatted });
+
   } catch (err) {
-    console.error('Create order error:', err);
-    res.status(500).json({ error: 'Server error' });
+    console.error('Create order error:', err.message);
+    res.status(500).json({ error: 'Could not place order. Please try again.' });
   }
 });
 
-// ── GET /api/orders — Retailer's own orders ──
+// ─────────────────────────────────────────────────────────────
+//  GET /api/orders  —  Retailer's own orders
+// ─────────────────────────────────────────────────────────────
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const { status } = req.query;
-    const where = { retailerId: req.retailer.retailerId };
-    if (status) where.status = status;
-
     const orders = await prisma.order.findMany({
-      where,
+      where:   { retailerId: req.retailer.id },
       orderBy: { createdAt: 'desc' },
       include: {
         items: {
-          include: { product: { select: { name: true, unit: true, imageUrl: true } } },
+          include: {
+            product: { select: { name: true, unit: true, imageUrl: true, category: true } },
+          },
         },
       },
     });
 
-    res.json({ orders });
+    const formatted = orders.map(o => ({
+      ...o,
+      subtotal:    o.subtotal   / 100,
+      gstAmount:   o.gstAmount  / 100,
+      grandTotal:  o.grandTotal / 100,
+      totalAmount: o.grandTotal / 100,
+      items: o.items.map(i => ({
+        ...i,
+        unitPrice: i.rate  / 100,
+        lineTotal: i.total / 100,
+        rate:      i.rate  / 100,
+        total:     i.total / 100,
+      })),
+    }));
+
+    res.json({ orders: formatted });
   } catch (err) {
-    console.error('Get orders error:', err);
-    res.status(500).json({ error: 'Server error' });
+    console.error('Get orders error:', err.message);
+    res.status(500).json({ error: 'Could not fetch orders' });
   }
 });
 
-// ── GET /api/orders/:id — Single order ───────
+// ─────────────────────────────────────────────────────────────
+//  GET /api/orders/:id  —  Single order details
+// ─────────────────────────────────────────────────────────────
 router.get('/:id', requireAuth, async (req, res) => {
   try {
-    const order = await prisma.order.findUnique({
-      where: { id: req.params.id },
+    const order = await prisma.order.findFirst({
+      where: { id: req.params.id, retailerId: req.retailer.id },
       include: {
         items: {
-          include: { product: { select: { name: true, unit: true, imageUrl: true } } },
+          include: {
+            product: { select: { name: true, unit: true, imageUrl: true, category: true, brand: true } },
+          },
         },
-        retailer: { select: { shopName: true, phone: true, district: true } },
       },
     });
 
     if (!order) return res.status(404).json({ error: 'Order not found' });
 
-    // Only owner or admin can view
-    if (order.retailerId !== req.retailer.retailerId && !req.retailer.isAdmin)
-      return res.status(403).json({ error: 'Not authorized' });
-
-    res.json({ order });
+    res.json({
+      order: {
+        ...order,
+        subtotal:    order.subtotal   / 100,
+        gstAmount:   order.gstAmount  / 100,
+        grandTotal:  order.grandTotal / 100,
+        totalAmount: order.grandTotal / 100,
+        items: order.items.map(i => ({
+          ...i,
+          unitPrice: i.rate  / 100,
+          lineTotal: i.total / 100,
+          rate:      i.rate  / 100,
+          total:     i.total / 100,
+        })),
+      },
+    });
   } catch (err) {
-    console.error('Get order error:', err);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: 'Could not fetch order' });
   }
 });
 
-// ── GET /api/orders/admin/all — All orders (admin) ──
-router.get('/admin/all', requireAuth, requireAdmin, async (req, res) => {
+// ─────────────────────────────────────────────────────────────
+//  PATCH /api/orders/:id/status  —  Admin updates order status
+// ─────────────────────────────────────────────────────────────
+router.patch('/:id/status', requireAdmin, async (req, res) => {
+  try {
+    const { status } = req.body;
+    const validStatuses = ['PLACED', 'PACKING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED'];
+
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ error: 'Invalid status. Must be one of: ' + validStatuses.join(', ') });
+    }
+
+    const order = await prisma.order.update({
+      where: { id: req.params.id },
+      data:  { status, updatedAt: new Date() },
+      select: { id: true, status: true, retailerId: true },
+    });
+
+    console.log(`[ADMIN] Order ${order.id} status → ${status} by ${req.retailer.phone}`);
+    res.json({ success: true, order });
+
+  } catch (err) {
+    if (err.code === 'P2025') return res.status(404).json({ error: 'Order not found' });
+    res.status(500).json({ error: 'Could not update order status' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  GET /api/orders/admin/all  —  Admin sees all orders
+// ─────────────────────────────────────────────────────────────
+router.get('/admin/all', requireAdmin, async (req, res) => {
   try {
     const { status } = req.query;
-    const where = {};
-    if (status) where.status = status;
+    const where = status ? { status } : {};
 
     const orders = await prisma.order.findMany({
       where,
       orderBy: { createdAt: 'desc' },
       include: {
+        retailer: { select: { shopName: true, phone: true, district: true } },
         items: {
-          include: { product: { select: { name: true, unit: true } } },
+          include: {
+            product: { select: { name: true, unit: true, imageUrl: true } },
+          },
         },
-        retailer: { select: { shopName: true, phone: true, district: true, gstin: true } },
       },
     });
 
-    const stats = {
-      total:     orders.length,
-      placed:    orders.filter(o => o.status === 'PLACED').length,
-      packing:   orders.filter(o => o.status === 'PACKING').length,
-      outForDelivery: orders.filter(o => o.status === 'OUT_FOR_DELIVERY').length,
-      delivered: orders.filter(o => o.status === 'DELIVERED').length,
-      cancelled: orders.filter(o => o.status === 'CANCELLED').length,
-    };
+    const formatted = orders.map(o => ({
+      ...o,
+      subtotal:    o.subtotal   / 100,
+      gstAmount:   o.gstAmount  / 100,
+      grandTotal:  o.grandTotal / 100,
+      totalAmount: o.grandTotal / 100,
+      items: o.items.map(i => ({
+        ...i,
+        unitPrice: i.rate  / 100,
+        lineTotal: i.total / 100,
+        rate:      i.rate  / 100,
+        total:     i.total / 100,
+      })),
+    }));
 
-    res.json({ orders, stats });
+    res.json({ orders: formatted, total: formatted.length });
   } catch (err) {
-    console.error('Admin get orders error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// ── PATCH /api/orders/:id/status — Update status (admin) ──
-router.patch('/:id/status', requireAuth, requireAdmin, async (req, res) => {
-  try {
-    const { status } = req.body;
-    const validStatuses = ['PLACED', 'PACKING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED'];
-    if (!validStatuses.includes(status))
-      return res.status(400).json({ error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
-
-    const order = await prisma.order.update({
-      where: { id: req.params.id },
-      data: { status },
-      include: {
-        retailer: { select: { shopName: true, phone: true } },
-      },
-    });
-
-    res.json({ order });
-  } catch (err) {
-    console.error('Update order status error:', err);
-    res.status(500).json({ error: 'Server error' });
+    console.error('Admin orders error:', err.message);
+    res.status(500).json({ error: 'Could not fetch orders' });
   }
 });
 
