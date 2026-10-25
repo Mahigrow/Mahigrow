@@ -16,6 +16,7 @@
 
 const router  = require('express').Router();
 const multer  = require('multer');
+const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { createClient } = require('@supabase/supabase-js');
 
 // Multer: store file in memory (not disk)
@@ -42,7 +43,7 @@ function getSupabase() {
 //  Accepts: multipart/form-data with field "image"
 //  Returns: { url: "https://..." }
 // ─────────────────────────────────────────────
-router.post('/product-image', upload.single('image'), async (req, res) => {
+router.post('/product-image', requireAuth, requireAdmin, upload.single('image'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No image file provided' });

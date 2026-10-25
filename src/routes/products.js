@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const prisma = require('../utils/prisma');
-const { requireAdmin } = require('../middleware/auth');
+const { requireAuth, requireAdmin } = require('../middleware/auth');
 
 // ── HELPERS ──────────────────────────────────────────────────────
 // Variants stored in paise, returned in rupees
@@ -108,7 +108,7 @@ router.get('/:id', async (req, res) => {
 //          variants: [{size, mrp, tiers}] }
 //  Prices sent in rupees, stored in paise
 // ─────────────────────────────────────────────────────
-router.post('/', requireAdmin, async (req, res) => {
+router.post('/', requireAuth, requireAdmin, async (req, res) => {
   try {
     const {
       name, brand, category, size, cert,
@@ -167,7 +167,7 @@ router.post('/', requireAdmin, async (req, res) => {
 //  PUT /api/products/:id
 //  Admin: update an existing product
 // ─────────────────────────────────────────────────────
-router.put('/:id', requireAdmin, async (req, res) => {
+router.put('/:id', requireAuth, requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const {
@@ -231,7 +231,7 @@ router.put('/:id', requireAdmin, async (req, res) => {
 //  Admin: delete a product (soft delete — sets isActive false)
 //  Use ?hard=true to permanently delete
 // ─────────────────────────────────────────────────────
-router.delete('/:id', requireAdmin, async (req, res) => {
+router.delete('/:id', requireAuth, requireAdmin, async (req, res) => {
   try {
     const { id }   = req.params;
     const hardDelete = req.query.hard === 'true';

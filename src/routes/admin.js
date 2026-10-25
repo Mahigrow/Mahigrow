@@ -6,10 +6,10 @@
 // ─────────────────────────────────────────────
 const router = require('express').Router();
 const prisma = require('../utils/prisma');
-const { requireAdmin } = require('../middleware/auth');
+const { requireAuth, requireAdmin } = require('../middleware/auth');
 
 // All routes require admin
-router.use(requireAdmin);
+router.use(requireAuth, requireAdmin);
 
 // ── GET /api/admin/retailers ──────────────────
 // List all retailers with full details
